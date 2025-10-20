@@ -1,37 +1,46 @@
 import streamlit as st
 import cv2
 import numpy as np
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
+from tensorflow.lite.python.interpreter import Interpreter
 from PIL import Image
 
+st.set_page_config(page_title="Fatigue / Eye State Detection", layout="centered")
 st.title("Fatigue / Eye State Detection")
 st.write("Detect whether eyes are open or closed in real-time.")
 
-# Load model
-model = load_model("fatigue_model.h5")
+# -------------------- Load TFLite model --------------------
+tflite_model_path = 'fatigue_model.tflite'
+interpreter = Interpreter(model_path=tflite_model_path)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
+# -------------------- Prediction Function --------------------
+def predict_tflite(image):
+    img = cv2.resize(cv2.cvtColor(np.array(image), cv2.COLOR_BGR2RGB), (224,224))
+    img = np.expand_dims(img, axis=0).astype(np.float32) / 255.0
+    interpreter.set_tensor(input_details[0]['index'], img)
+    interpreter.invoke()
+    output = interpreter.get_tensor(output_details[0]['index'])[0][0]
+    return output
+
+# -------------------- App UI --------------------
 option = st.radio("Choose input method:", ("Upload Image", "Use Webcam"))
 
-def preprocess_image(image):
-    img = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, (224, 224))
-    img = img_to_array(img) / 255.0
-    img = np.expand_dims(img, axis=0)
-    return img
-
-# Upload image
+# -------------------- Upload Image --------------------
 if option == "Upload Image":
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg","jpeg","png"])
     if uploaded_file is not None:
         image = Image.open(uploaded_file)
         st.image(image, caption="Uploaded Image", use_column_width=True)
         st.write("Classifying...")
-        processed = preprocess_image(image)
-        prediction = model.predict(processed)[0][0]
-        st.success("Eyes OPEN 👀" if prediction>=0.5 else "Eyes CLOSED 😴")
+        prediction = predict_tflite(image)
+        if prediction >= 0.5:
+            st.success("Eyes OPEN 👀")
+        else:
+            st.success("Eyes CLOSED 😴")
 
-# Webcam
+# -------------------- Webcam --------------------
 if option == "Use Webcam":
     run = st.checkbox('Start Webcam')
     FRAME_WINDOW = st.image([])
@@ -42,11 +51,9 @@ if option == "Use Webcam":
         if not ret:
             st.write("Failed to grab frame")
             break
-        processed = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (224,224))
-        processed = img_to_array(processed)/255.0
-        processed = np.expand_dims(processed, axis=0)
-        prediction = model.predict(processed)[0][0]
-        label = "Eyes OPEN 👀" if prediction>=0.5 else "Eyes CLOSED 😴"
+        prediction = predict_tflite(frame)
+        label = "Eyes OPEN 👀" if prediction >= 0.5 else "Eyes CLOSED 😴"
         cv2.putText(frame, label, (10,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
         FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
     cap.release()
