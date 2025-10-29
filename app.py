@@ -1,72 +1,88 @@
 import streamlit as st
 import cv2
 import numpy as np
-import tempfile
 import requests
+import tempfile
 import base64
-import os
+import time
 from io import BytesIO
-from pydub.generators import Sine
+from PIL import Image
+import pygame
 
-# Backend API endpoint
-BACKEND_URL = "https://drowsiness-detection-1-djgk.onrender.com/predict"
+# ----------------------------
+# CONFIGURATION
+# ----------------------------
+BACKEND_URL = "https://drowsiness-detection-1-djgk.onrender.com/predict"  # Your backend URL
 
-# Function to create a beep sound as base64 (so Streamlit can play it)
-def generate_beep_base64():
-    sine_wave = Sine(800).to_audio_segment(duration=700)  # 800 Hz, 0.7 sec
-    buffer = BytesIO()
-    sine_wave.export(buffer, format="mp3")
-    b64 = base64.b64encode(buffer.getvalue()).decode()
-    return f"""
-        <audio autoplay>
-        <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-        </audio>
-    """
+st.set_page_config(page_title="Driver Drowsiness Detection", layout="centered")
 
-# Streamlit UI
-st.set_page_config(page_title="🚗 Drowsiness Detection System", layout="centered")
-st.title("🚗 Emotion-Aware Drowsiness Detection System")
-st.markdown("### Detect eye state (Open/Closed) to help prevent road accidents.")
+# ----------------------------
+# PAGE HEADER
+# ----------------------------
+st.title("🚗 Real-Time Drowsiness Detection System")
+st.markdown("""
+This system detects **eye state (Open/Closed)** in real-time using your webcam.  
+If eyes are **closed**, it generates an alert sound to help prevent accidents.
+""")
 
-# Sidebar for input options
-st.sidebar.header("Choose Input Method")
-use_camera = st.sidebar.checkbox("Use Camera")
+# ----------------------------
+# SOUND SETUP (alert beep)
+# ----------------------------
+pygame.mixer.init()
+beep_sound = pygame.mixer.Sound("https://actions.google.com/sounds/v1/alarms/beep_short.ogg")
 
-if use_camera:
-    img_file_buffer = st.camera_input("Capture Image")
+# ----------------------------
+# WEBCAM SECTION
+# ----------------------------
+run = st.checkbox('Start Webcam', value=False)
+FRAME_WINDOW = st.image([])
+
+cap = cv2.VideoCapture(0)
+
+if run:
+    st.info("Starting detection... Press 'Stop Webcam' to end.")
+    while run:
+        ret, frame = cap.read()
+        if not ret:
+            st.error("Failed to access webcam. Try again.")
+            break
+
+        # Convert frame for backend
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb_frame)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        files = {"file": ("frame.png", buf, "image/png")}
+
+        # Send to backend
+        try:
+            response = requests.post(BACKEND_URL, files=files)
+            if response.status_code == 200:
+                result = response.json()
+                prob = result.get("interpretation", {}).get("prob", 0.5)
+                label = "Open" if prob >= 0.5 else "Closed"
+                color = (0, 255, 0) if label == "Open" else (0, 0, 255)
+
+                # Draw label on frame
+                cv2.putText(frame, f"{label} ({prob*100:.1f}%)", (30, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+
+                # Alert if closed eyes detected
+                if label == "Closed":
+                    pygame.mixer.Sound.play(beep_sound)
+                    st.warning("⚠️ Driver appears drowsy! Wake up!")
+
+            else:
+                cv2.putText(frame, "Backend Error", (30, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        except Exception as e:
+            cv2.putText(frame, "API Connection Error", (30, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
+        FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        time.sleep(0.5)
+
 else:
-    img_file_buffer = st.file_uploader("Upload an image of your face", type=["jpg", "jpeg", "png"])
-
-if img_file_buffer is not None:
-    # Read the image
-    file_bytes = np.asarray(bytearray(img_file_buffer.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, 1)
-    st.image(image, channels="BGR", caption="Uploaded Image", use_container_width=True)
-
-    # Save temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-        cv2.imwrite(tmp.name, image)
-        tmp_path = tmp.name
-
-    # Send to backend
-    with open(tmp_path, "rb") as f:
-        files = {"file": f}
-        response = requests.post(BACKEND_URL, files=files)
-
-    if response.status_code == 200:
-        result = response.json()
-        state = result.get("eye_state", "unknown").capitalize()
-        confidence = result.get("confidence", "0")
-
-        st.success(f"**Detected Eye State:** {state}")
-        st.info(f"**Confidence:** {confidence}%")
-
-        if state.lower() == "closed":
-            st.warning("⚠️ Driver appears drowsy! Beep alert activated.")
-            st.markdown(generate_beep_base64(), unsafe_allow_html=True)
-        else:
-            st.success("✅ Eyes open. Driver is alert.")
-    else:
-        st.error("Error connecting to the backend API.")
-
-    os.remove(tmp_path)
+    st.info("Webcam stopped.")
+    cap.release()
