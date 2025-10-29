@@ -1,88 +1,105 @@
 import streamlit as st
 import cv2
 import numpy as np
-import requests
+import tensorflow as tf
 import tempfile
-import base64
 import time
-from io import BytesIO
-from PIL import Image
-import pygame
+from datetime import datetime
+import csv
+import streamlit.components.v1 as components
 
-# ----------------------------
-# CONFIGURATION
-# ----------------------------
-BACKEND_URL = "https://drowsiness-detection-1-djgk.onrender.com/predict"  # Your backend URL
+# -----------------------------
+# Configuration
+# -----------------------------
+BACKEND_URL = "https://drowsiness-detection-1-djgk.onrender.com/predict"
+MODEL_PATH = "fatigue_model.tflite"  # Optional local fallback
 
-st.set_page_config(page_title="Driver Drowsiness Detection", layout="centered")
+# -----------------------------
+# Helper functions
+# -----------------------------
+def play_beep():
+    """Play a short browser beep using HTML."""
+    beep_html = """
+    <audio autoplay>
+        <source src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" type="audio/ogg">
+    </audio>
+    """
+    components.html(beep_html, height=0)
 
-# ----------------------------
-# PAGE HEADER
-# ----------------------------
-st.title("🚗 Real-Time Drowsiness Detection System")
-st.markdown("""
-This system detects **eye state (Open/Closed)** in real-time using your webcam.  
-If eyes are **closed**, it generates an alert sound to help prevent accidents.
-""")
+def log_alert():
+    """Log drowsiness detection events."""
+    with open("drowsiness_log.csv", "a") as f:
+        writer = csv.writer(f)
+        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Drowsiness detected"])
 
-# ----------------------------
-# SOUND SETUP (alert beep)
-# ----------------------------
-pygame.mixer.init()
-beep_sound = pygame.mixer.Sound("https://actions.google.com/sounds/v1/alarms/beep_short.ogg")
+def predict_eye_state(frame):
+    """Send frame to backend for prediction."""
+    try:
+        _, img_encoded = cv2.imencode(".jpg", frame)
+        files = {"file": ("frame.jpg", img_encoded.tobytes(), "image/jpeg")}
+        import requests
+        response = requests.post(BACKEND_URL, files=files)
+        if response.status_code == 200:
+            data = response.json()
+            prob = data.get("interpretation", {}).get("prob", 0.5)
+            label = "Open" if prob >= 0.5 else "Closed"
+            return label, prob
+        else:
+            return "Unknown", 0
+    except Exception as e:
+        print("Backend error:", e)
+        return "Error", 0
 
-# ----------------------------
-# WEBCAM SECTION
-# ----------------------------
-run = st.checkbox('Start Webcam', value=False)
-FRAME_WINDOW = st.image([])
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+st.set_page_config(page_title="Emotion Aware Driving Alert System", layout="wide")
+st.title("🚗 Emotion-Aware Driving Alert System")
+st.markdown("### Real-time Drowsiness Detection using Eye State Analysis")
 
-cap = cv2.VideoCapture(0)
+st.sidebar.header("🔧 Settings")
+confidence_threshold = st.sidebar.slider("Drowsiness Alert Threshold", 0.0, 1.0, 0.5, 0.05)
+
+stframe = st.empty()
+alert_placeholder = st.empty()
+
+run = st.toggle("Start Camera")
 
 if run:
-    st.info("Starting detection... Press 'Stop Webcam' to end.")
+    cap = cv2.VideoCapture(0)
+    st.markdown("🟢 **Camera Active — Scanning for Drowsiness...**")
+
     while run:
         ret, frame = cap.read()
         if not ret:
-            st.error("Failed to access webcam. Try again.")
+            st.error("Camera not detected.")
             break
 
-        # Convert frame for backend
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(rgb_frame)
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        files = {"file": ("frame.png", buf, "image/png")}
+        # Preprocess for prediction
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(frame_rgb, (224, 224))
 
-        # Send to backend
-        try:
-            response = requests.post(BACKEND_URL, files=files)
-            if response.status_code == 200:
-                result = response.json()
-                prob = result.get("interpretation", {}).get("prob", 0.5)
-                label = "Open" if prob >= 0.5 else "Closed"
-                color = (0, 255, 0) if label == "Open" else (0, 0, 255)
+        # Get prediction
+        label, prob = predict_eye_state(resized)
 
-                # Draw label on frame
-                cv2.putText(frame, f"{label} ({prob*100:.1f}%)", (30, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+        # Display on frame
+        color = (0, 255, 0) if label == "Open" else (0, 0, 255)
+        cv2.putText(frame, f"Eye State: {label} ({prob:.2f})", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        stframe.image(frame, channels="RGB")
 
-                # Alert if closed eyes detected
-                if label == "Closed":
-                    pygame.mixer.Sound.play(beep_sound)
-                    st.warning("⚠️ Driver appears drowsy! Wake up!")
+        # Trigger alerts if drowsy
+        if label == "Closed" and prob < confidence_threshold:
+            alert_placeholder.error("🚨 EYES CLOSED! DRIVER DROWSY! 🚨")
+            play_beep()
+            log_alert()
+        else:
+            alert_placeholder.empty()
 
-            else:
-                cv2.putText(frame, "Backend Error", (30, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-        except Exception as e:
-            cv2.putText(frame, "API Connection Error", (30, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        time.sleep(0.1)
 
-        FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        time.sleep(0.5)
-
-else:
-    st.info("Webcam stopped.")
     cap.release()
+else:
+    st.info("👆 Click 'Start Camera' to begin monitoring.")
+
+st.markdown("---")
+st.caption("Developed by Tamanna Vaikkath | Emotion Aware Driving Alert System | Powered by Streamlit & TensorFlow Lite")
