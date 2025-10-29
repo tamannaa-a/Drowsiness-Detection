@@ -1,15 +1,17 @@
+// frontend/src/App.js
 import React, { useRef, useEffect, useState } from "react";
 
 /*
-  FRONTEND NOTES:
-  - Configure backend URL via REACT_APP_BACKEND_URL env variable.
-  - The frontend captures a frame from the webcam every INTERVAL_MS and posts it as multipart/form-data to /predict
-  - Frontend uses consecutive closed-frame counts to reduce flicker.
+  FRONTEND:
+  - captures webcam frames
+  - sends a snapshot to backend at interval
+  - uses consecutive-closed-frame logic to raise alert
+  - set BACKEND_URL using REACT_APP_BACKEND_URL env variable or default to localhost
 */
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000/predict";
-const INTERVAL_MS = 700;        // how often to send frames
-const CLOSED_THRESHOLD = 0.6;   // backend score threshold to count as "closed"
+const INTERVAL_MS = 700;        // interval between frames (ms)
+const CLOSED_THRESHOLD = 0.6;   // backend score threshold to consider "Closed"
 const CLOSED_CONSEC = 3;        // consecutive frames to trigger alert
 
 function App() {
@@ -22,8 +24,8 @@ function App() {
   const closedCountRef = useRef(0);
   const [alertState, setAlertState] = useState(false);
 
-  // Web Audio API beep generator (no external file)
-  function beep(duration = 200, frequency = 800, volume = 0.2) {
+  // beep generator
+  function beep(duration = 300, frequency = 750, volume = 0.2) {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const o = ctx.createOscillator();
@@ -41,13 +43,10 @@ function App() {
   }
 
   useEffect(() => {
-    // request webcam on mount
     async function initWebcam() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
+        if (videoRef.current) videoRef.current.srcObject = stream;
       } catch (err) {
         setStatus("Webcam access denied");
       }
@@ -65,6 +64,7 @@ function App() {
       if (timer) clearInterval(timer);
     }
     return () => { if (timer) clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running]);
 
   async function captureAndSend() {
@@ -73,23 +73,22 @@ function App() {
     }
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
     const w = 320, h = 240;
     canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
     ctx.drawImage(video, 0, 0, w, h);
 
     setStatus("Sending...");
     canvas.toBlob(async (blob) => {
       if (!blob) { setStatus("Capture failed"); return; }
 
-      // prepare multipart
       const form = new FormData();
       form.append("file", blob, "frame.jpg");
 
       try {
         const resp = await fetch(BACKEND_URL, { method: "POST", body: form });
         if (!resp.ok) {
-          setStatus("Server error");
+          setStatus("Server error: " + resp.status);
           return;
         }
         const data = await resp.json();
@@ -97,7 +96,6 @@ function App() {
         setScore(Number(data.score).toFixed(2));
         setStatus("OK");
 
-        // check closed score
         if (data.label === "Closed" && data.score >= CLOSED_THRESHOLD) {
           closedCountRef.current += 1;
         } else {
@@ -105,12 +103,10 @@ function App() {
           setAlertState(false);
         }
 
-        // if closed for enough consecutive frames -> alert
         if (closedCountRef.current >= CLOSED_CONSEC) {
           if (!alertState) {
             setAlertState(true);
-            // beep and visual
-            beep(350, 750, 0.2);
+            beep(400, 800, 0.2);
           }
         }
       } catch (e) {
@@ -121,7 +117,7 @@ function App() {
   }
 
   return (
-    <div style={{ fontFamily: "Arial,Helvetica,sans-serif", padding: 20 }}>
+    <div style={{ padding: 18 }}>
       <h2>🚗 Emotion-Aware Driving — Eye-State Detector</h2>
 
       <div style={{ display: "flex", gap: 20 }}>
@@ -162,10 +158,6 @@ function App() {
             </small>
           </div>
         </div>
-      </div>
-
-      <div style={{ marginTop: 18 }}>
-        <strong>Notes:</strong> If the browser blocks audio autoplay, interact with the page (click start) to allow beep playback.
       </div>
     </div>
   );
