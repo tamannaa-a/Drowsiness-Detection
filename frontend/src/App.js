@@ -1,166 +1,173 @@
-// frontend/src/App.js
-import React, { useRef, useEffect, useState } from "react";
-
-/*
-  FRONTEND:
-  - captures webcam frames
-  - sends a snapshot to backend at interval
-  - uses consecutive-closed-frame logic to raise alert
-  - set BACKEND_URL using REACT_APP_BACKEND_URL env variable or default to localhost
-*/
-
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8000/predict";
-const INTERVAL_MS = 700;        // interval between frames (ms)
-const CLOSED_THRESHOLD = 0.6;   // backend score threshold to consider "Closed"
-const CLOSED_CONSEC = 3;        // consecutive frames to trigger alert
+import React, { useRef, useState, useEffect } from "react";
 
 function App() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const [alertMsg, setAlertMsg] = useState("");
+  const [isDrowsy, setIsDrowsy] = useState(false);
   const [running, setRunning] = useState(false);
-  const [status, setStatus] = useState("Idle");
-  const [label, setLabel] = useState("N/A");
-  const [score, setScore] = useState(0);
-  const closedCountRef = useRef(0);
-  const [alertState, setAlertState] = useState(false);
 
-  // beep generator
-  function beep(duration = 300, frequency = 750, volume = 0.2) {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      o.type = "sine";
-      o.frequency.value = frequency;
-      g.gain.value = volume;
-      o.connect(g);
-      g.connect(ctx.destination);
-      o.start(0);
-      setTimeout(() => { o.stop(); ctx.close(); }, duration);
-    } catch (e) {
-      console.warn("Beep failed:", e);
-    }
-  }
+  const backendURL = "https://drowsiness-detection-1-djgk.onrender.com/predict";
 
   useEffect(() => {
-    async function initWebcam() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        if (videoRef.current) videoRef.current.srcObject = stream;
-      } catch (err) {
-        setStatus("Webcam access denied");
-      }
-    }
-    initWebcam();
+    startCamera();
   }, []);
 
-  useEffect(() => {
-    let timer = null;
-    if (running) {
-      timer = setInterval(() => {
-        captureAndSend();
-      }, INTERVAL_MS);
-    } else {
-      if (timer) clearInterval(timer);
+  // Start webcam
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+      });
+      videoRef.current.srcObject = stream;
+    } catch (error) {
+      console.error("Error accessing webcam:", error);
     }
-    return () => { if (timer) clearInterval(timer); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running]);
+  };
 
-  async function captureAndSend() {
-    if (!videoRef.current || videoRef.current.readyState < 2) {
-      return;
-    }
-    const video = videoRef.current;
+  // Play alert sound
+  const playAlertSound = () => {
+    const audio = new Audio(
+      "https://actions.google.com/sounds/v1/alarms/beep_short.ogg"
+    );
+    audio.play();
+  };
+
+  // Capture frame and send to backend
+  const detectDrowsiness = async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+
     const canvas = canvasRef.current;
-    const w = 320, h = 240;
-    canvas.width = w; canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, w, h);
+    const context = canvas.getContext("2d");
+    context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
 
-    setStatus("Sending...");
     canvas.toBlob(async (blob) => {
-      if (!blob) { setStatus("Capture failed"); return; }
-
-      const form = new FormData();
-      form.append("file", blob, "frame.jpg");
+      const formData = new FormData();
+      formData.append("file", blob, "frame.jpg");
 
       try {
-        const resp = await fetch(BACKEND_URL, { method: "POST", body: form });
-        if (!resp.ok) {
-          setStatus("Server error: " + resp.status);
-          return;
-        }
-        const data = await resp.json();
-        setLabel(data.label);
-        setScore(Number(data.score).toFixed(2));
-        setStatus("OK");
+        const response = await fetch(backendURL, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
 
-        if (data.label === "Closed" && data.score >= CLOSED_THRESHOLD) {
-          closedCountRef.current += 1;
+        if (data.prediction === "closed") {
+          setAlertMsg("⚠️ Drowsiness Detected! Please stay alert!");
+          if (!isDrowsy) playAlertSound();
+          setIsDrowsy(true);
         } else {
-          closedCountRef.current = 0;
-          setAlertState(false);
+          setAlertMsg("✅ Eyes Open — You’re alert!");
+          setIsDrowsy(false);
         }
-
-        if (closedCountRef.current >= CLOSED_CONSEC) {
-          if (!alertState) {
-            setAlertState(true);
-            beep(400, 800, 0.2);
-          }
-        }
-      } catch (e) {
-        console.error(e);
-        setStatus("Network error");
+      } catch (error) {
+        console.error("Prediction error:", error);
       }
-    }, "image/jpeg", 0.85);
-  }
+    }, "image/jpeg");
+  };
+
+  // Start/stop detection loop
+  useEffect(() => {
+    let interval;
+    if (running) {
+      interval = setInterval(detectDrowsiness, 2000); // every 2 sec
+    } else {
+      clearInterval(interval);
+    }
+    return () => clearInterval(interval);
+  }, [running]);
 
   return (
-    <div style={{ padding: 18 }}>
-      <h2>🚗 Emotion-Aware Driving — Eye-State Detector</h2>
+    <div style={styles.container}>
+      <h1 style={styles.title}>🚗 Real-Time Drowsiness Detection System</h1>
 
-      <div style={{ display: "flex", gap: 20 }}>
-        <div>
-          <video ref={videoRef} autoPlay playsInline muted style={{ width: 480, height: 360, borderRadius: 6, border: "1px solid #ccc" }} />
-          <canvas ref={canvasRef} style={{ display: "none" }} />
-          <div style={{ marginTop: 8 }}>
-            <button onClick={() => setRunning(r => !r)} style={{ padding: "8px 12px" }}>
-              {running ? "Stop Monitoring" : "Start Monitoring"}
-            </button>
-          </div>
-        </div>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        width="640"
+        height="480"
+        style={styles.video}
+      />
 
-        <div style={{ width: 360 }}>
-          <h3>Status: {status}</h3>
-          <p>Label: <b>{label}</b></p>
-          <p>Score: <b>{score}</b></p>
+      <canvas ref={canvasRef} width="640" height="480" style={{ display: "none" }} />
 
-          <div style={{
-            marginTop: 12,
-            padding: 12,
-            borderRadius: 8,
-            background: alertState ? "#ffdddd" : "#ddffdd",
-            border: "1px solid #aaa"
-          }}>
-            <h4 style={{ margin: 0 }}>
-              {alertState ? "⚠️ DROWSINESS WARNING — WAKE UP!" : "Driver Attentive"}
-            </h4>
-            <p style={{ marginTop: 8, color: "#333", fontSize: 14 }}>
-              Consecutive closed frames: {closedCountRef.current}
-            </p>
-          </div>
-
-          <div style={{ marginTop: 20 }}>
-            <small>
-              Backend: <code>{BACKEND_URL}</code><br />
-              Send interval: {INTERVAL_MS} ms • Closed threshold: {CLOSED_THRESHOLD} • Consecutive frames to alert: {CLOSED_CONSEC}
-            </small>
-          </div>
-        </div>
+      <div style={styles.buttonContainer}>
+        {!running ? (
+          <button onClick={() => setRunning(true)} style={styles.startBtn}>
+            ▶️ Start Detection
+          </button>
+        ) : (
+          <button onClick={() => setRunning(false)} style={styles.stopBtn}>
+            ⏹ Stop Detection
+          </button>
+        )}
       </div>
+
+      <div style={styles.alertBox(isDrowsy)}>
+        <p>{alertMsg}</p>
+      </div>
+
+      <footer style={styles.footer}>
+        Built by <b>Tamanna Vaikkath</b> | Emotion-Aware Driver Safety System
+      </footer>
     </div>
   );
 }
+
+// CSS Styles
+const styles = {
+  container: {
+    textAlign: "center",
+    backgroundColor: "#f9fafb",
+    minHeight: "100vh",
+    padding: "20px",
+  },
+  title: {
+    fontSize: "2rem",
+    color: "#333",
+    marginBottom: "20px",
+  },
+  video: {
+    borderRadius: "10px",
+    boxShadow: "0 4px 10px rgba(0,0,0,0.2)",
+  },
+  buttonContainer: {
+    marginTop: "20px",
+  },
+  startBtn: {
+    backgroundColor: "#4CAF50",
+    color: "white",
+    border: "none",
+    padding: "10px 20px",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontSize: "1rem",
+  },
+  stopBtn: {
+    backgroundColor: "#e74c3c",
+    color: "white",
+    border: "none",
+    padding: "10px 20px",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontSize: "1rem",
+  },
+  alertBox: (isDrowsy) => ({
+    marginTop: "30px",
+    padding: "15px",
+    backgroundColor: isDrowsy ? "#ffcccc" : "#ccffcc",
+    borderRadius: "8px",
+    width: "60%",
+    margin: "auto",
+    fontWeight: "bold",
+    color: "#333",
+  }),
+  footer: {
+    marginTop: "40px",
+    color: "#666",
+  },
+};
 
 export default App;
