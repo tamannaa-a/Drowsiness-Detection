@@ -1,14 +1,15 @@
+# backend/Dockerfile
 FROM python:3.10-slim
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# copy app
+COPY requirements.txt .
+RUN apt-get update && apt-get install -y gcc libglib2.0-0 libsm6 libxrender1 libxext6 && \
+    pip install --no-cache-dir -r requirements.txt
+
 COPY . .
 
-# adjust MODEL_PATH env var as needed, or mount model into /app/saved_model
-ENV MODEL_PATH=/app/saved_model/drowsiness_model.h5
-
+ENV MODEL_PATH=/app/saved_model/fatigue_model.tflite
 EXPOSE 8000
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
