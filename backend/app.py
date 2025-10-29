@@ -1,100 +1,62 @@
-# backend/main.py
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+import numpy as np
+import tensorflow as tf
+import cv2
 import os
 import io
-import uvicorn
-import numpy as np
-import cv2
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-# Use tensorflow's tflite interpreter
-from tensorflow.lite.python.interpreter import Interpreter
+app = FastAPI()
 
-# ------------ CONFIG ------------
-MODEL_PATH = os.getenv("MODEL_PATH", "saved_model/fatigue_model.tflite")
-IMG_SIZE = (224, 224)   # change if your model expects another size
-CLASS_NAMES = ["Closed", "Open"]  # Make sure this ordering matches model training
-# --------------------------------
+# ✅ Correct path to your model
+MODEL_PATH = "saved_model/fatigue_model.tflite"
 
-app = FastAPI(title="Drowsiness Detection API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # For production, restrict this to your frontend origin(s)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class PredictResponse(BaseModel):
-    label: str
-    score: float
-
-# Load tflite model at startup
+# Load model
 if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"Model not found at {MODEL_PATH}. Place your tflite model there or set MODEL_PATH env var.")
+    raise FileNotFoundError(f"Model not found at {MODEL_PATH}")
 
-print("Loading TFLite model from:", MODEL_PATH)
-interpreter = Interpreter(model_path=MODEL_PATH)
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
+
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-print("Model loaded. Input details:", input_details, "Output details:", output_details)
-
-def preprocess_image_bytes(image_bytes: bytes):
-    """Convert image bytes to a numpy array and preprocess to model input shape."""
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        return None
-    # convert BGR->RGB
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, IMG_SIZE)
-    # normalize float32 0..1
-    img = img.astype(np.float32) / 255.0
-    # Expand dims to (1,H,W,3)
-    return np.expand_dims(img, axis=0)
 
 @app.get("/")
 def root():
     return {"status": "ok"}
 
-@app.post("/predict", response_model=PredictResponse)
+@app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    """
-    Accepts multipart file upload (image). Returns predicted label and score.
-    """
-    contents = await file.read()
-    img = preprocess_image_bytes(contents)
-    if img is None:
-        raise HTTPException(status_code=400, detail="Could not decode image")
+    try:
+        # Read image
+        image_bytes = await file.read()
+        image = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(image, cv2.IMREAD_COLOR)
 
-    # set tensor
-    interpreter.set_tensor(input_details[0]["index"], img)
-    interpreter.invoke()
-    output_data = interpreter.get_tensor(output_details[0]["index"])
-    # handle different output shapes (softmax, logits, etc.)
-    probs = np.squeeze(output_data)
-    # if single output (logit) -> convert with sigmoid
-    if probs.ndim == 0 or probs.size == 1:
-        # binary single-output -> apply sigmoid
-        prob = float(1.0 / (1.0 + np.exp(-probs)))
-        # map to classes: treat prob as "Open" probability by convention (adjust if needed)
-        probs_arr = np.array([1 - prob, prob])
-    else:
-        # assume probs is array-like e.g. [p_closed, p_open] or [p_open, p_closed]
-        probs_arr = probs
-        # if outputs are logits, apply softmax
-        if np.any(probs_arr < 0) or probs_arr.sum() != 1.0:
-            exp = np.exp(probs_arr - np.max(probs_arr))
-            probs_arr = exp / exp.sum()
+        # ✅ Preprocess: match training size (adjust if needed)
+        IMG_SIZE = (224, 224)  # or 128x128 depending on your training
+        img_resized = cv2.resize(img, IMG_SIZE)
+        img_array = img_resized.astype("float32") / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
 
-    idx = int(np.argmax(probs_arr))
-    score = float(probs_arr[idx])
+        # Run inference
+        interpreter.set_tensor(input_details[0]['index'], img_array)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])[0][0]
 
-    label = CLASS_NAMES[idx]
-    return {"label": label, "score": score}
+        # ✅ Interpret result
+        # Model likely returns sigmoid: 0=open, 1=closed
+        eye_state = "Closed" if output_data > 0.5 else "Open"
+        confidence = round(float(output_data * 100), 2) if eye_state == "Closed" else round(float((1 - output_data) * 100), 2)
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+        return JSONResponse({
+            "eye_state": eye_state,
+            "confidence": confidence
+        })
+
+    except Exception as e:
+        return JSONResponse({
+            "error": str(e),
+            "eye_state": "unknown",
+            "confidence": 0
+        })
