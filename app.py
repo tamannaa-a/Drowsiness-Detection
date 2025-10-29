@@ -1,12 +1,13 @@
 import streamlit as st
 import cv2
 import numpy as np
-import tensorflow as tf
 import tempfile
 import time
 from datetime import datetime
 import csv
 import streamlit.components.v1 as components
+import requests
+
 
 # -----------------------------
 # Configuration
