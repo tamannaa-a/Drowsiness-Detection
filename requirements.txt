@@ -2,6 +2,8 @@ streamlit==1.39.0
 opencv-python==4.7.0.72
 mediapipe==1.5.0
 numpy==1.26.4
-simpleaudio==1.0.4
-fastapi==0.95.2    # optional backend
-uvicorn==0.22.0    # optional backend
+Pillow==10.4.0
+requests==2.32.3
+python-multipart==0.0.20
+fastapi==0.95.2
+uvicorn==0.22.0
