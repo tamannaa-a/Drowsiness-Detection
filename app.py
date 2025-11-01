@@ -1,91 +1,150 @@
+# streamlit_app.py
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
-import requests
-import simpleaudio as sa
+import mediapipe as mp
+from utils import eye_aspect_ratio, play_beep
+import time
 
-BACKEND_URL = "https://fatigue-backend.onrender.com/predict"
+st.set_page_config(page_title="Drowsiness Detection (Eye EAR)", layout="wide")
 
-st.set_page_config(layout="wide")
-st.title("🚗 Driver Drowsiness Detection System (Streamlit Frontend)")
+st.title("🚗 Emotion-aware Driving: Eye State (Open/Closed) — Streamlit (Local Webcam)")
+st.caption("Uses MediaPipe FaceMesh + EAR. Run this locally to allow webcam access (Streamlit can't access local hardware when hosted on Render without extra signalling).")
 
-run = st.checkbox("Start Camera")
+start = st.button("Start Webcam")
+stop = st.button("Stop Webcam")
+
 FRAME_WINDOW = st.image([])
 
+# MediaPipe setup
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False,
+                                  max_num_faces=1,
+                                  refine_landmarks=True,
+                                  min_detection_confidence=0.5,
+                                  min_tracking_confidence=0.5)
 
-LEFT_EYE = [33, 246, 161, 160, 159, 158, 157, 173]
-RIGHT_EYE = [362, 398, 384, 385, 386, 387, 388, 466]
+# Eye landmark indices for MediaPipe FaceMesh (right and left eye)
+# We'll use a subset approximating 6 relevant points per eye for EAR calculation.
+# These indices are from MediaPipe's 468-point mesh.
+# Right eye (as subject's right): use points approximating outer/inner and vertical pairings
+RIGHT_EYE_IDX = [33, 160, 158, 133, 144, 153]   # approximate 6 points
+LEFT_EYE_IDX  = [362, 385, 387, 263, 373, 380]  # approximate 6 points
 
-def beep_alarm():
-    wave = sa.WaveObject.from_wave_file("beep.wav")
-    wave.play()
+EAR_THRESH = 0.22         # tuneable (lower means stricter closed detection)
+CONSEC_FRAMES = 15        # how many consecutive frames below threshold before alarm
 
-def crop_eye(frame, lm, idx):
-    h, w, _ = frame.shape
-    coords = [(int(lm[i].x * w), int(lm[i].y * h)) for i in idx]
-    xs = [p[0] for p in coords]
-    ys = [p[1] for p in coords]
+cap = None
+if "running" not in st.session_state:
+    st.session_state.running = False
+if "counter" not in st.session_state:
+    st.session_state.counter = 0
+if "alarm_on" not in st.session_state:
+    st.session_state.alarm_on = False
 
-    x1, x2 = max(min(xs)-5, 0), min(max(xs)+5, w)
-    y1, y2 = max(min(ys)-5, 0), min(max(ys)+5, h)
+if start:
+    st.session_state.running = True
+    st.session_state.counter = 0
+    st.session_state.alarm_on = False
 
-    crop = frame[y1:y2, x1:x2]
-    return crop if crop.size != 0 else None
+if stop:
+    st.session_state.running = False
+    if cap is not None:
+        try:
+            cap.release()
+        except:
+            pass
 
-if run:
-    cap = cv2.VideoCapture(0)
-    closed_frames = 0
+if st.session_state.running:
+    # open webcam
+    if cap is None:
+        cap = cv2.VideoCapture(0)
+        # try second camera if 0 fails
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(1)
+    if not cap.isOpened():
+        st.error("Could not open webcam. Make sure your webcam is connected and allowed.")
+    else:
+        try:
+            while st.session_state.running:
+                ret, frame = cap.read()
+                if not ret:
+                    st.warning("Empty frame. Retrying...")
+                    time.sleep(0.1)
+                    continue
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
+                img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = face_mesh.process(img_rgb)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = face_mesh.process(rgb)
+                status_text = "No face"
+                ear_val = None
 
-        state = "Detecting..."
-        color = (0, 255, 0)
+                if results.multi_face_landmarks:
+                    face_landmarks = results.multi_face_landmarks[0]
+                    h, w, _ = frame.shape
 
-        if result.multi_face_landmarks:
-            lm = result.multi_face_landmarks[0].landmark
+                    def landmark_coords(idx):
+                        lm = face_landmarks.landmark[idx]
+                        return np.array([lm.x * w, lm.y * h])
 
-            left_eye = crop_eye(frame, lm, LEFT_EYE)
-            right_eye = crop_eye(frame, lm, RIGHT_EYE)
+                    # gather points
+                    r_pts = [landmark_coords(i) for i in RIGHT_EYE_IDX]
+                    l_pts = [landmark_coords(i) for i in LEFT_EYE_IDX]
 
-            eyes = []
-            if left_eye is not None: eyes.append(left_eye)
-            if right_eye is not None: eyes.append(right_eye)
+                    # compute EAR for both eyes
+                    ear_r = eye_aspect_ratio(r_pts)
+                    ear_l = eye_aspect_ratio(l_pts)
+                    ear_val = (ear_r + ear_l) / 2.0
 
-            states = []
+                    # draw eye contours
+                    for p in r_pts:
+                        cv2.circle(frame, tuple(p.astype(int)), 2, (0,255,0), -1)
+                    for p in l_pts:
+                        cv2.circle(frame, tuple(p.astype(int)), 2, (0,255,0), -1)
 
-            for eye in eyes:
-                success, buf = cv2.imencode(".jpg", eye)
-                r = requests.post(BACKEND_URL, files={
-                    "file": ("eye.jpg", buf.tobytes(), "image/jpeg")
-                })
-                pred = r.json()
-                states.append(pred["state"])
+                    # decide state
+                    if ear_val < EAR_THRESH:
+                        st.session_state.counter += 1
+                    else:
+                        st.session_state.counter = 0
+                        st.session_state.alarm_on = False
 
-            if "closed" in states:
-                closed_frames += 1
-                state = "EYES CLOSED"
-                color = (0, 0, 255)
+                    if st.session_state.counter >= CONSEC_FRAMES:
+                        status_text = "DROWSY / Eyes CLOSED"
+                        # trigger beep if not already on
+                        if not st.session_state.alarm_on:
+                            st.session_state.alarm_on = True
+                            play_beep(frequency=1000, duration_ms=350, volume=0.35)
+                    else:
+                        status_text = "Eyes OPEN" if ear_val is not None else "No face"
 
-                if closed_frames > 10:
-                    beep_alarm()
-            else:
-                closed_frames = 0
-                state = "EYES OPEN"
-                color = (0, 255, 0)
+                    # overlay text
+                    cv2.putText(frame, f"EAR: {ear_val:.3f}" if ear_val is not None else "EAR: --",
+                                (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2)
+                    cv2.putText(frame, status_text, (10,70), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                                (0,0,255) if "DROWSY" in status_text else (0,255,0), 2)
+                else:
+                    st.session_state.counter = 0
+                    st.session_state.alarm_on = False
 
-        cv2.putText(frame, state, (30, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+                # show image
+                FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-        FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                # small sleep to reduce CPU usage
+                time.sleep(0.02)
 
+        except Exception as e:
+            st.error(f"Streaming loop exited: {e}")
+        finally:
+            if cap:
+                cap.release()
+            st.session_state.running = False
 else:
-    st.write("Camera stopped ✅")
+    st.info("Press **Start Webcam** to begin real-time detection (this uses your local webcam).")
+    st.markdown(
+        """
+        **Notes**
+        - This app must be run *locally* so it can access your webcam: `streamlit run streamlit_app.py`.
+        - If you want to deploy to cloud (Render) and still use a browser webcam, see the README (or ask and I'll provide a streamlit-webrtc version).
+        """
+    )
