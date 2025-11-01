@@ -8,8 +8,7 @@ import time
 
 st.set_page_config(page_title="Drowsiness Detection (Eye EAR)", layout="wide")
 
-st.title("🚗 Emotion-aware Driving: Eye State (Open/Closed) — Streamlit (Local Webcam)")
-st.caption("Uses MediaPipe FaceMesh + EAR. Run this locally to allow webcam access (Streamlit can't access local hardware when hosted on Render without extra signalling).")
+st.title("🚗 Emotion-aware Driving Alert System")
 
 start = st.button("Start Webcam")
 stop = st.button("Stop Webcam")
@@ -141,10 +140,3 @@ if st.session_state.running:
             st.session_state.running = False
 else:
     st.info("Press **Start Webcam** to begin real-time detection (this uses your local webcam).")
-    st.markdown(
-        """
-        **Notes**
-        - This app must be run *locally* so it can access your webcam: `streamlit run streamlit_app.py`.
-        - If you want to deploy to cloud (Render) and still use a browser webcam, see the README (or ask and I'll provide a streamlit-webrtc version).
-        """
-    )
